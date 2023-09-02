@@ -1,12 +1,12 @@
 /*
  * Title:        EdgeCloudSim - Edge Orchestrator
- * 
- * Description: 
+ *
+ * Description:
  * SampleEdgeOrchestrator offloads tasks to proper server
  * by considering WAN bandwidth and edge server utilization.
  * After the target server is decided, the least loaded VM is selected.
  * If the target server is a remote edge server, MAN is used.
- * 
+ *
  * Licence:      GPL - http://www.gnu.org/copyleft/gpl.html
  * Copyright (c) 2017, Bogazici University, Istanbul, Turkey
  */
@@ -21,15 +21,15 @@ import edu.boun.edgecloudsim.edge_client.Task;
 import edu.boun.edgecloudsim.edge_orchestrator.EdgeOrchestrator;
 import edu.boun.edgecloudsim.edge_server.EdgeVM;
 import edu.boun.edgecloudsim.utils.Location;
-import edu.boun.edgecloudsim.utils.SimLogger;
 import edu.boun.edgecloudsim.utils.SimUtils;
 import org.cloudbus.cloudsim.Host;
-import org.cloudbus.cloudsim.UtilizationModelFull;
 import org.cloudbus.cloudsim.Vm;
 import org.cloudbus.cloudsim.core.CloudSim;
 import org.cloudbus.cloudsim.core.SimEvent;
 
 import java.util.List;
+import java.util.Arrays;
+import java.util.Random;
 
 public class SampleEdgeOrchestrator6 extends EdgeOrchestrator {
 
@@ -95,6 +95,7 @@ public class SampleEdgeOrchestrator6 extends EdgeOrchestrator {
 		return selectedVM;
 	}
 
+
 	public EdgeVM selectVmOnHost(Task task){
 		EdgeVM selectedVM = null;
 
@@ -103,6 +104,9 @@ public class SampleEdgeOrchestrator6 extends EdgeOrchestrator {
 		//because there is only one host in one place
 		int relatedHostId=deviceLocation.getServingWlanId();
 		List<EdgeVM> vmArray = SimManager.getInstance().getEdgeServerManager().getVmList(relatedHostId);
+
+		System.out.println("Related Host ID: " + relatedHostId);
+		System.out.println(vmArray);
 
 		if(policy.equalsIgnoreCase("RANDOM_FIT")){
 			int randomIndex = SimUtils.getRandomNumber(0, vmArray.size()-1);
@@ -185,8 +189,165 @@ public class SampleEdgeOrchestrator6 extends EdgeOrchestrator {
 				tries++;
 			}
 		}
+		else if (policy.equalsIgnoreCase("MAX_MIN")) {
+			double maxAvailableCapacity = 0; // Start with min value
+			for (int vmIndex = 0; vmIndex < vmArray.size(); vmIndex++) {
+				double requiredCapacity = ((CpuUtilizationModel_Custom) task.getUtilizationModelCpu()).predictUtilization(vmArray.get(vmIndex).getVmType());
+				double targetVmCapacity = 100 - vmArray.get(vmIndex).getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock());
+
+				// Check if the VM can accommodate the task and has higher available capacity
+				if (requiredCapacity <= targetVmCapacity && targetVmCapacity > maxAvailableCapacity) {
+					selectedVM = vmArray.get(vmIndex);
+					maxAvailableCapacity = targetVmCapacity;
+				}
+			}
+		}
+		else if (policy.equalsIgnoreCase("ANT_COLONY_OPTIMIZATION")) {
+			// ACO-specific parameters
+			int numAnts = 10; // Number of ants in the colony
+			int maxIterations = 50; // Maximum number of iterations
+			double alpha = 1.0; // Pheromone importance factor
+			double beta = 2.0; // Heuristic information importance factor
+			double evaporationRate = 0.1; // Pheromone evaporation rate
+			double initialPheromone = 0.1; // Initial pheromone level
+
+			// Initialize pheromone levels
+			double[][] pheromones = new double[numAnts][vmArray.size()];
+			for (int i = 0; i < numAnts; i++) {
+				Arrays.fill(pheromones[i], initialPheromone);
+			}
+			try{
+
+				double globalBestFitness = Double.POSITIVE_INFINITY;
+				int[] globalBestSolution = new int[vmArray.size()];
+
+				// ACO main loop
+				for (int iteration = 0; iteration < maxIterations; iteration++) {
+					int[] solutions = new int[numAnts];
+					double[] fitnesses = new double[numAnts];
+
+					// Construct solutions for each ant
+					for (int antIndex = 0; antIndex < numAnts; antIndex++) {
+						int selectedVMIndex = -1;
+						double fitness = 0.0;
+
+						try{
+							selectedVMIndex = constructSolution(antIndex, pheromones, alpha, beta, vmArray);
+							System.out.println("Selected VM Index by Ant: " + Double.toString(globalBestFitness));
+							fitness = evaluateFitness(selectedVMIndex, vmArray, task); // Evaluate the fitness of the solution
+						}
+						catch (Exception e){
+							System.out.println(e.getMessage());
+						}
+
+
+						solutions[antIndex] = selectedVMIndex; // Store selected VM index
+						fitnesses[antIndex] = fitness; // Store fitness value
+						System.out.println("Fitness: " + Double.toString(fitness));
+
+						// Update global best if necessary
+						if (fitness < globalBestFitness) {
+							globalBestFitness = fitness;
+							System.out.println("Global Fitness Updated: " + Double.toString(globalBestFitness));
+							System.arraycopy(solutions, 0, globalBestSolution, 0, solutions.length);
+						}
+						System.out.println("Global Fitness: " + Double.toString(fitness));
+					}
+
+					// Update pheromone levels
+					updatePheromones(pheromones, solutions, fitnesses, evaporationRate);
+				}
+
+
+				System.out.println("Global Best Solution: " + Arrays.toString(globalBestSolution));
+				if (globalBestSolution != null) {
+					selectedVM = vmArray.get(globalBestSolution[relatedHostId]);
+				}
+
+			}catch (ArrayIndexOutOfBoundsException e) {
+				e.printStackTrace();
+			}
+
+		}
 
 		return selectedVM;
+	}
+
+	private double evaluateFitness(int selectedVMIndex, List<EdgeVM> vmArray,Task task ) {
+		// Check if selectedVMIndex is valid
+
+		if (selectedVMIndex >= 0 && selectedVMIndex < vmArray.size()) {
+			EdgeVM selectedVM = vmArray.get(selectedVMIndex);
+
+			double vmMipsCapacity = selectedVM.getMips();
+			// Get the task's processing requirements (in MIPS)
+			double taskMipsRequirement = task.getCloudletTotalLength(); // This might need to be scaled or adjusted
+
+			// Calculate the execution time in seconds
+			double executionTimeInSeconds = taskMipsRequirement / vmMipsCapacity;
+
+			// Convert execution time to milliseconds
+			double executionTimeInMilliseconds = executionTimeInSeconds * 1000;
+			double taskExecutionTime = executionTimeInMilliseconds;
+
+			//double taskExecutionTime = selectedVM.getCloudletScheduler().getEstimatedFinishTime(CloudSim.clock());
+			double totalUtilization = selectedVM.getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock()) / 100.0;
+			double executionTimeWeight = 0.7; // Importance of minimizing execution time
+			double utilizationWeight = 0.3; // Importance of minimizing resource utilization
+			double fitness = executionTimeWeight * taskExecutionTime + utilizationWeight * totalUtilization;
+			return fitness;
+		}
+		else {
+			// Handle the case where selectedVMIndex is invalid
+			return Double.POSITIVE_INFINITY; // Return a large value to indicate invalid index
+		}
+	}
+
+	private int constructSolution(int antIndex, double[][] pheromones, double alpha, double beta, List<EdgeVM> vmArray) {
+		int selectedVMIndex = -1;
+		double totalProbabilities = 0.0;
+
+		// Calculate probabilities for selecting each VM based on pheromone and heuristic information
+		double[] probabilities = new double[vmArray.size()];
+		for (int vmIndex = 0; vmIndex < vmArray.size(); vmIndex++) {
+			double pheromoneFactor = Math.pow(pheromones[antIndex][vmIndex], alpha);
+			double heuristicFactor = Math.pow(1.0 / vmArray.get(vmIndex).getCloudletScheduler().getTotalUtilizationOfCpu(CloudSim.clock()), beta);
+
+			System.out.println("pheromoneFactor:" + pheromoneFactor);
+			System.out.println("heuristicFactor:" + heuristicFactor);
+
+			probabilities[vmIndex] = pheromoneFactor * heuristicFactor;
+			totalProbabilities += probabilities[vmIndex];
+
+			System.out.println("probabilities:" + Arrays.toString(probabilities));
+			System.out.println("totalProbabilities:" + totalProbabilities);
+		}
+
+		// Select a VM based on probabilities using a roulette wheel selection
+
+		double randomValue = new Random().nextDouble(); // Generates a random double between 0 (inclusive) and 1 (exclusive)
+//		double randomValue = SimUtils.getRandomNumber(0, vmArray.size()-1);
+		System.out.println("Random Value"+ randomValue);
+		double cumulativeProbability = 0.0;
+		for (int vmIndex = 0; vmIndex < vmArray.size(); vmIndex++) {
+			cumulativeProbability += probabilities[vmIndex] / totalProbabilities;
+			System.out.println("Cummilative Prob:" + cumulativeProbability);
+			if (randomValue <= cumulativeProbability) {
+				selectedVMIndex = vmIndex;
+				break;
+			}
+		}
+		System.out.println("Selected VM Index returned:" + selectedVMIndex);
+		return selectedVMIndex;
+	}
+
+	private void updatePheromones(double[][] pheromones, int[] solutions, double[] fitnesses, double evaporationRate) {
+		for (int antIndex = 0; antIndex < solutions.length; antIndex++) {
+			double pheromoneDelta = 1.0 / fitnesses[antIndex];
+			for (int vmIndex = 0; vmIndex < pheromones[antIndex].length; vmIndex++) {
+				pheromones[antIndex][vmIndex] = (1 - evaporationRate) * pheromones[antIndex][vmIndex] + pheromoneDelta;
+			}
+		}
 	}
 
 	public EdgeVM selectVmOnLoadBalancer(Task task){
