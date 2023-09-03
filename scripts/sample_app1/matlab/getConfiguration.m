@@ -4,7 +4,7 @@
 %--------------------------------------------------------------
 function [ret_val] = getConfiguration(argType)
     if(argType == 1)
-        ret_val = '/MATLAB Drive/trial/sim_results';
+        ret_val = '/MATLAB Drive/sample_app1/sim_results';
     elseif(argType == 2)
         ret_val = 1; %Number of iterations
     elseif(argType == 3)
